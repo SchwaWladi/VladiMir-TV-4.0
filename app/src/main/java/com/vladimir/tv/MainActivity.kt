@@ -85,12 +85,13 @@ class MainActivity : Activity() {
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
 
-    private var remoteServer: ServerSocket? = null
+    @Volatile private var remoteServer: ServerSocket? = null
     private val remoteToken = UUID.randomUUID()
         .toString().replace("-", "")
 
     @Volatile
-    private var remoteRunning = false
+    @Volatile private var remoteStarting = false
+    @Volatile private var remoteRunning = false
 
     private val bg = Color.rgb(12, 17, 29)
     private val panel = Color.rgb(28, 36, 53)
@@ -261,7 +262,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             isFocusable = true
             isClickable = true
-            setPadding(dp(16), dp(18), dp(16), dp(18))
+            setPadding(dp(14), dp(10), dp(14), dp(10))
 
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -320,12 +321,18 @@ class MainActivity : Activity() {
         )
 
         if (prefs.getBoolean("show_clock", true)) {
-            val clock = label("", 17f, true)
+            val clock = label("", 17f, true).apply { gravity = Gravity.END }
             header.addView(clock)
             val refresh = object : Runnable {
                 override fun run() {
                     if (clock.parent != null) {
-                        clock.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+                        val now = Date()
+                        val locale = Locale.forLanguageTag(lang)
+                        val time = SimpleDateFormat("HH:mm", locale).format(now)
+                        clock.text = if (prefs.getBoolean("show_date", true)) {
+                            val date = SimpleDateFormat("EEEE, d MMMM", locale).format(now)
+                            "$time\n$date"
+                        } else time
                         clockHandler.postDelayed(this, 30000)
                     }
                 }
@@ -353,135 +360,33 @@ class MainActivity : Activity() {
 
     private fun showHome() {
         scaffold("home")
-
-        val hero = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(24))
-
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(
-                    accent,
-                    Color.rgb(21, 28, 48)
-                )
-            ).apply {
-                cornerRadius = dp(18).toFloat()
-            }
+        content.addView(label("VladiMir TV", 36f, true).apply {
+            typeface = Typeface.create("serif", Typeface.BOLD_ITALIC)
+        })
+        val phone = isPhone()
+        val row = LinearLayout(this).apply {
+            orientation = if (phone) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         }
-
-        hero.addView(label("VLADIMIR TV 4.0", 32f, true))
-
-        hero.addView(
-            label(
-                tr(
-                    "Твой домашний кинотеатр",
-                    "Dein Heimkino",
-                    "Your home cinema"
-                ),
-                23f,
-                true
-            )
-        )
-
-        hero.addView(
-            button(
-                tr(
-                    "▶ Смотреть ТВ",
-                    "▶ Fernsehen",
-                    "▶ Watch TV"
-                )
-            ) {
-                showTvMenu()
-            }
-        )
-
-        content.addView(hero)
-
-        sectionTitle(
-            tr(
-                "Что будем смотреть?",
-                "Was möchtest du sehen?",
-                "What would you like to watch?"
-            )
-        )
-
-        val sections = listOf(
-            Triple(
-                tr("Телевидение", "Fernsehen", "Live TV"),
-                tr("Все каналы", "Alle Sender", "All channels"),
-                "tv"
-            ),
-            Triple(tr("ТЕЛЕПРОГРАММА", "PROGRAMM", "TV GUIDE"), tr("Программа передач", "Fernsehprogramm", "TV schedule"), "guide"),
-            Triple(tr("Видеотека", "Mediathek", "Video library"),
-                tr("Фильмы", "Filme", "Movies"), "movies"),
-            Triple(tr("ИСТОЧНИКИ", "QUELLEN", "SOURCES"),
-                tr("Добавить плейлист или провайдера", "Playlist oder Anbieter hinzufügen",
-                    "Add a playlist or provider"), "sources"),
-            Triple(tr("QR-КОД", "QR-CODE", "QR CODE"),
-                tr("Добавить с телефона", "Per Handy hinzufügen", "Add from your phone"), "remote"),
-            Triple(
-                tr("НАСТРОЙКИ", "EINSTELLUNGEN", "SETTINGS"),
-                tr("Источники и QR", "Quellen und QR", "Sources and QR"),
-                "settings"
-            )
-        )
-
-        fun homeTile(name: String, subtitle: String, id: String): View {
-            val (icon, color) = when (id) {
-                "tv" -> R.drawable.ic_live_television to Color.rgb(81, 207, 255)
-                "movies" -> R.drawable.ic_cinema to Color.rgb(225, 150, 255)
-                "sources" -> android.R.drawable.ic_input_add to Color.rgb(117, 242, 160)
-                "remote" -> android.R.drawable.ic_menu_camera to Color.rgb(255, 195, 100)
-                "favorites" -> android.R.drawable.btn_star_big_on to Color.rgb(255, 212, 96)
-                "guide" -> android.R.drawable.ic_menu_agenda to Color.rgb(121, 203, 255)
-                else -> android.R.drawable.ic_menu_manage to Color.rgb(166, 179, 255)
-            }
-            return tile(name, subtitle, icon, color) { openSection(id) }
+        fun addCard(title: String, summary: String, icon: Int, tint: Int, id: String): View {
+            val card = tile(title, summary, icon, tint) { openSection(id) }
+            val params = if (phone) LinearLayout.LayoutParams(-1, dp(120))
+                else LinearLayout.LayoutParams(0, dp(155), 1f)
+            params.setMargins(dp(6), dp(6), dp(6), dp(6))
+            row.addView(card, params)
+            return card
         }
-
-        if (isPhone()) {
-            sections.forEach { (name, sub, id) ->
-                content.addView(
-                    homeTile(name, sub, id),
-                    LinearLayout.LayoutParams(-1, dp(116))
-                )
-            }
-        } else {
-            sections.chunked(3).forEach { group ->
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                }
-
-                group.forEach { (name, sub, id) ->
-                    row.addView(
-                        homeTile(name, sub, id),
-                        LinearLayout.LayoutParams(
-                            0,
-                            dp(150),
-                            1f
-                        )
-                    )
-                }
-
-                content.addView(row)
-            }
-        }
-
-        if (lists.isEmpty()) {
-            content.addView(
-                label(
-                    tr(
-                        "Добавь первый M3U-плейлист",
-                        "Erste M3U-Playlist hinzufügen",
-                        "Add your first M3U playlist"
-                    )
-                )
-            )
-        } else {
-            content.addView(
-                label("${items.size} каналов и видео")
-            )
-        }
+        val live = addCard(tr("\u041f\u0440\u044f\u043c\u043e\u0439 \u044d\u0444\u0438\u0440", "Live-TV", "Live TV"),
+            tr("\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438 \u0438 \u043a\u0430\u043d\u0430\u043b\u044b", "Kategorien und Sender", "Categories and channels"),
+            R.drawable.ic_live_television, Color.rgb(81, 207, 255), "tv")
+        addCard(tr("\u041c\u0435\u0434\u0438\u0430\u0442\u0435\u043a\u0430", "Mediathek", "Media library"),
+            tr("\u0424\u0438\u043b\u044c\u043c\u044b", "Filme", "Movies"),
+            R.drawable.ic_cinema, Color.rgb(225, 150, 255), "movies")
+        addCard(tr("\u0422\u0435\u043b\u0435\u0433\u0438\u0434", "TV-Programm", "TV guide"),
+            tr("\u041f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0430 \u043f\u0435\u0440\u0435\u0434\u0430\u0447", "Sendungen", "TV schedule"),
+            android.R.drawable.ic_menu_agenda, Color.rgb(255, 196, 106), "guide")
+        content.addView(row)
+        content.addView(button(tr("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438", "Quellen", "Sources")) { showSources() })
+        live.requestFocus()
     }
 
     private fun openSection(id: String) {
@@ -506,7 +411,14 @@ class MainActivity : Activity() {
             showCatalog("favorites")
         }
         menu.addView(favorites)
-        items.filter { it.type == "tv" }.map { it.group }.distinct().sorted().forEach { group ->
+        val groups = items.filter { it.type == "tv" }.map { it.group }.distinct().sorted()
+        menu.addView(label(tr("Категории", "Kategorien", "Categories"), 20f, true))
+        if (groups.isEmpty()) {
+            menu.addView(label(tr("Добавь ТВ-плейлист, чтобы увидеть категории.", "TV-Playlist für Kategorien hinzufügen.", "Add a TV playlist to see categories.")))
+            menu.addView(button(tr("Добавить с телефона · QR", "Per Handy hinzufügen · QR", "Add from phone · QR")) { showRemote() })
+            menu.addView(button("+ M3U") { showPlaylists() })
+        }
+        groups.forEach { group ->
             val name = group.ifBlank { tr("Другие", "Sonstige", "Other") }
             menu.addView(button(name) { showCatalog("tv", group) })
         }
@@ -526,7 +438,19 @@ class MainActivity : Activity() {
             }
         )
 
-        if ((if (type == "movies") vodItems else items).isEmpty()) {
+        val catalog = if (type == "movies") {
+            vodItems + Entry(
+                title = "Big Buck Bunny",
+                url = "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_720p_h264.mov",
+                group = tr("Открытые фильмы", "Offene Filme", "Open films"),
+                type = "movies",
+                description = tr("Анимационная комедия о добродушном кролике.",
+                    "Animationskomödie über einen gutmütigen Hasen.",
+                    "An animated comedy about a gentle rabbit.") +
+                    " © 2008 Blender Foundation / www.bigbuckbunny.org · CC BY 3.0"
+            )
+        } else items
+        if (catalog.isEmpty()) {
             content.addView(
                 label(
                     tr(
@@ -547,7 +471,7 @@ class MainActivity : Activity() {
             prefs.getStringSet("favorites", emptySet())
                 ?: emptySet()
 
-        val candidates = (if (type == "movies") vodItems else items).filter {
+        val candidates = catalog.filter {
             when (type) {
                 "favorites" -> favorites.contains(it.url)
                 "tv" -> it.type == "tv" && (selectedGroup == null || it.group == selectedGroup)
@@ -944,7 +868,7 @@ class MainActivity : Activity() {
         return result
     }
 
-    private fun play(entry: Entry, streamUrl: String = entry.url) {
+    private fun play(entry: Entry, streamUrl: String = entry.url, archived: Programme? = null) {
         currentEntry = entry
         requestedOrientation = if (isPhone()) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         prefs.edit().putString("recent", entry.url).apply()
@@ -971,8 +895,8 @@ class MainActivity : Activity() {
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
                     KeyEvent.KEYCODE_MENU -> { showChannelOverlay(); true }
-                    KeyEvent.KEYCODE_DPAD_LEFT -> { showSideGuide(); true }
-                    KeyEvent.KEYCODE_DPAD_RIGHT -> { showChannelOverlay(); true }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> if (entry.type == "tv") { showSideGuide(); true } else false
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> if (entry.type == "tv") { showChannelOverlay(); true } else false
                     KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_MEDIA_NEXT -> { changeChannel(1); true }
                     KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { changeChannel(-1); true }
                     else -> false
@@ -1007,6 +931,7 @@ class MainActivity : Activity() {
             }
             frame.addView(clock, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
         }
+        if (entry.type == "tv") showChannelInfo(frame, entry, archived)
         setContentView(frame)
         view.requestFocus()
         try {
@@ -1063,46 +988,56 @@ class MainActivity : Activity() {
 
     private fun showChannelOverlay() {
         val all = items.filter { it.type == "tv" }
-        if (all.isEmpty()) { toast(tr("Нет каналов", "Keine Sender", "No channels")); return }
+        val selected = currentEntry
+        val group = if (catalogGroup == selected?.group) catalogGroup else null
+        val available = if (group == null) all else all.filter { it.group == group }
         val channels = if (prefs.getBoolean("sort_channels_alpha", false))
-            all.sortedBy { it.title.lowercase(Locale.ROOT) } else all
-        val favorites = prefs.getStringSet("favorites", emptySet()).orEmpty()
-        val categories = channels.groupBy { entry ->
-            entry.group.ifBlank { tr("Другие", "Sonstige", "Other") }
-        }.toSortedMap()
-
-        fun showChannels(heading: String, entries: List<Entry>) {
-            openPanel(false, heading) { body ->
-                if (entries.isEmpty()) {
-                    body.addView(label(tr("В этом списке пока нет каналов",
-                        "Diese Liste enthält noch keine Sender", "This list has no channels yet")))
-                }
-                entries.forEach { entry ->
-                    val row = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                    }
-                    row.addView(artwork(entry.logo, 65, 46))
-                    row.addView(button(entry.title) { play(entry) },
-                        LinearLayout.LayoutParams(0, dp(54), 1f))
-                    body.addView(row)
-                }
+            available.sortedBy { it.title.lowercase(Locale.ROOT) } else available
+        val now = System.currentTimeMillis()
+        openPanel(false, tr("\u0422\u0435\u043b\u0435\u043a\u0430\u043d\u0430\u043b\u044b", "Sender", "Channels")) { body ->
+            var selectedButton: View? = null
+            channels.forEach { entry ->
+                val title = guideEntries(entry).firstOrNull { now in it.start until it.stop }?.title
+                val row = button(entry.title + if (title.isNullOrBlank()) "" else "\n$title") { play(entry) }
+                body.addView(row)
+                if (entry.url == selected?.url) selectedButton = row
             }
-            sidePanelBack = { showChannelOverlay() }
+            if (channels.isEmpty()) body.addView(label(tr("\u041d\u0435\u0442 \u043a\u0430\u043d\u0430\u043b\u043e\u0432", "Keine Sender", "No channels")))
+            selectedButton?.let { row -> row.post { row.requestFocus() } }
         }
+    }
 
-        openPanel(false, tr("Категории каналов", "Senderkategorien", "Channel categories")) { body ->
-            body.addView(button(tr("Избранное", "Favoriten", "Favorites")) {
-                showChannels(tr("Избранное", "Favoriten", "Favorites"),
-                    channels.filter { it.url in favorites })
-            })
-            body.addView(button(tr("Все каналы", "Alle Sender", "All channels")) {
-                showChannels(tr("Все каналы", "Alle Sender", "All channels"), channels)
-            })
-            categories.forEach { (name, entries) ->
-                body.addView(button(name) { showChannels(name, entries) })
+    private fun showChannelInfo(frame: FrameLayout, entry: Entry, archived: Programme?) {
+        val now = System.currentTimeMillis()
+        val schedule = guideEntries(entry)
+        val airing = schedule.firstOrNull { now in it.start until it.stop }
+        val next = schedule.firstOrNull { it.start >= (airing?.stop ?: now) }
+        val programme = archived ?: airing
+        val time = SimpleDateFormat("HH:mm", Locale.forLanguageTag(lang))
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            background = GradientDrawable().apply {
+                setColor(0xED172740.toInt())
+                cornerRadius = dp(14).toFloat()
             }
         }
+        panel.addView(label(entry.title, 19f, true))
+        if (programme != null) {
+            val range = time.format(Date(programme.start)) + "\u2013" + time.format(Date(programme.stop))
+            val status = if (archived == null) tr("\u0421\u0435\u0439\u0447\u0430\u0441", "Jetzt", "Now") else tr("\u0410\u0440\u0445\u0438\u0432", "Archiv", "Archive")
+            panel.addView(label("$status \u00b7 $range   ${programme.title}", 17f, true))
+        } else {
+            panel.addView(label(tr("\u041d\u0435\u0442 \u0442\u0435\u043b\u0435\u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u044b \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u043a\u0430\u043d\u0430\u043b\u0430", "Keine Programmdaten f\u00fcr diesen Sender", "No guide data for this channel"), 15f))
+        }
+        if (archived == null && next != null) {
+            panel.addView(label(tr("\u0414\u0430\u043b\u0435\u0435", "Danach", "Next") + " \u00b7 " +
+                time.format(Date(next.start)) + "   " + next.title, 15f))
+        }
+        frame.addView(panel, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+            setMargins(dp(20), 0, dp(20), dp(16))
+        })
+        panel.postDelayed({ frame.removeView(panel) }, 6500L)
     }
 
     private fun guideEntries(entry: Entry): List<Programme> {
@@ -1138,7 +1073,7 @@ class MainActivity : Activity() {
                             entry.archiveDays > 0 && programme.start >= playbackTime - entry.archiveDays * 86400000L) {
                             val timestamp = SimpleDateFormat("yyyy-MM-dd:HH-mm", Locale.ROOT)
                                 .format(Date(programme.start))
-                            play(entry, "${entry.archiveBase}/$durationMinutes/$timestamp/${entry.archiveStreamId}.ts")
+                            play(entry, "${entry.archiveBase}/$durationMinutes/$timestamp/${entry.archiveStreamId}.ts", archived = programme)
                             return@button
                         }
                         AlertDialog.Builder(this)
@@ -1198,6 +1133,7 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private var lastSettingsItem: String? = null
     private fun showSettings(section: String? = null) {
         val sections = linkedMapOf(
             "tv_playlists" to tr("Плейлисты телевидения", "TV-Playlisten", "TV playlists"),
@@ -1302,6 +1238,12 @@ class MainActivity : Activity() {
                     showSettings(section)
                 }
             )
+            content.addView(button(tr("\u0414\u0430\u0442\u0430 \u0438 \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438", "Datum und Wochentag", "Date and weekday") +
+                (if (prefs.getBoolean("show_date", true)) " \u2713" else "")) {
+                prefs.edit().putBoolean("show_date", !prefs.getBoolean("show_date", true)).apply()
+                showSettings(section)
+            })
+
             }
             "language" -> {
             val languages = listOf(
@@ -1327,11 +1269,13 @@ class MainActivity : Activity() {
             }
             else -> sections.forEach { (id, title) ->
                 content.addView(button(title) {
+                    lastSettingsItem = id
                     if (id == "remote") showRemote() else showSettings(id)
                 })
             }
         }
-        content.getChildAt(1)?.requestFocus()
+        val selected = if (section == null) sections.keys.toList().indexOf(lastSettingsItem.orEmpty()).coerceAtLeast(0) else 0
+        content.getChildAt(selected + 1)?.requestFocus()
     }
 
     private fun showSources() {
@@ -1344,7 +1288,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle(tr("Источники", "Quellen", "Sources"))
             .setItems(sources.map { it.first }.toTypedArray()) { _, index -> sources[index].second() }
-            .setNeutralButton("QR") { _, _ -> showRemote() }
+            .setNeutralButton(tr("С телефона · QR", "Per Handy · QR", "From phone · QR")) { _, _ -> showRemote() }
             .setNegativeButton(tr("Закрыть", "Schließen", "Close"), null)
             .show()
     }
@@ -1535,6 +1479,10 @@ class MainActivity : Activity() {
     }
 
     private fun localIp(): String? {
+        val manager = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        manager.activeNetwork?.let { manager.getLinkProperties(it) }?.linkAddresses
+            ?.map { it.address }?.firstOrNull { it is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress }
+            ?.hostAddress?.let { return it }
         return try {
             val interfaces =
                 NetworkInterface.getNetworkInterfaces()
@@ -1569,11 +1517,14 @@ class MainActivity : Activity() {
     }
 
     private fun remoteUrl(): String? =
-        localIp()?.let {
-            "http://$it:8765/?key=$remoteToken"
+        remoteServer?.takeUnless { it.isClosed }?.localPort?.let { port ->
+            localIp()?.let { ip -> "http://$ip:$port/?key=$remoteToken" }
         }
 
+    private var remoteReturnPage = "home"
+
     private fun showRemote() {
+        if (current != "remote") remoteReturnPage = current
         scaffold("remote")
 
         sectionTitle(
@@ -1587,6 +1538,10 @@ class MainActivity : Activity() {
         val url = remoteUrl()
 
         if (url == null || !remoteRunning) {
+            content.addView(button(tr("Повторить", "Erneut versuchen", "Try again")) {
+                startRemoteServer()
+                showRemote()
+            })
             content.addView(
                 label(
                     tr(
@@ -1652,13 +1607,16 @@ class MainActivity : Activity() {
     }
 
     private fun startRemoteServer() {
-        if (remoteRunning) return
+        if (remoteRunning || remoteStarting) return
+        remoteStarting = true
 
         thread(name = "VladiMirRemote") {
             try {
-                val server = ServerSocket(8765)
+                val server = ServerSocket(0)
                 remoteServer = server
                 remoteRunning = true
+                remoteStarting = false
+                runOnUiThread { if (!isDestroyed && current == "remote") showRemote() }
 
                 while (!server.isClosed) {
                     val client = server.accept()
@@ -1668,6 +1626,7 @@ class MainActivity : Activity() {
                 }
             } catch (_: Exception) {
                 remoteRunning = false
+                remoteStarting = false
             }
         }
     }
@@ -1910,6 +1869,10 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (current == "home") {
+            finish()
+            return
+        }
         if (current == "player" && sidePanel != null) {
             sidePanelBack?.invoke() ?: closeSidePanel()
             return
@@ -1918,6 +1881,12 @@ class MainActivity : Activity() {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             player?.pause()
             if (currentEntry?.type == "movies") showCatalog("movies") else showTvMenu()
+        } else if (current == "remote") {
+            when (remoteReturnPage) {
+                "settings", "settings_section" -> showSettings()
+                "tv_menu" -> showTvMenu()
+                else -> showHome()
+            }
         } else if (current == "settings_section") {
             showSettings()
         } else if (current == "tv" || current == "favorites") {
@@ -1942,3 +1911,6 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 }
+
+
+
