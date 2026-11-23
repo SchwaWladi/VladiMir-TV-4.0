@@ -54,7 +54,8 @@ class MainActivity : Activity() {
         val archiveDays: Int = 0,
         val archiveBase: String = "",
         val archiveStreamId: String = "",
-        val description: String = ""
+        val description: String = "",
+        val catchupSource: String = ""
     )
 
     private val prefs by lazy {
@@ -295,7 +296,9 @@ class MainActivity : Activity() {
 
     private fun scaffold(page: String) {
         if (isPhone()) window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        closeSidePanel()
         current = page
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         base = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -789,9 +792,14 @@ class MainActivity : Activity() {
                 connection.disconnect()
 
                 val parsed = parseM3u(body)
+                val guides = m3uGuideUrls(body, url)
 
                 runOnUiThread {
-                    if (index == activeList) {
+                    if (index == activeList && lists.getOrNull(index)?.second == url) {
+                        if (playlistGuideUrls != guides) {
+                            playlistGuideUrls = guides
+                            loadEpg()
+                        }
                         items.removeAll { it.url !in parsed.map { entry -> entry.url } && !it.url.contains("/live/") }
                         items.addAll(parsed.filter { entry -> items.none { it.url == entry.url } })
                         toast("${parsed.size} items")
@@ -806,6 +814,16 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun m3uGuideUrls(body: String, playlistUrl: String): List<String> {
+        val header = body.lineSequence().map { it.trim().trimStart('\uFEFF') }
+            .firstOrNull { it.startsWith("#EXTM3U", true) }.orEmpty()
+        return Regex("""(?:url-tvg|x-tvg-url|tvg-url)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))""", RegexOption.IGNORE_CASE)
+            .findAll(header).flatMap { match -> match.groupValues.drop(1).filter { it.isNotBlank() }.asSequence() }
+            .flatMap { it.split(',').asSequence() }.mapNotNull { value ->
+                runCatching { URL(URL(playlistUrl), value.trim()).toString() }.getOrNull()
+            }.filter { it.startsWith("http://") || it.startsWith("https://") }.distinct().toList()
+    }
+
     private fun parseM3u(raw: String): List<Entry> {
         val result = ArrayList<Entry>()
 
@@ -814,6 +832,8 @@ class MainActivity : Activity() {
         var logo = ""
         var epgId = ""
         var description = ""
+        var catchup = ""
+        var days = 0
 
         val attributes = Regex(
             "([\\w-]+)=\"([^\"]*)\""
@@ -823,7 +843,7 @@ class MainActivity : Activity() {
             if (line.startsWith("#EXTINF", true)) {
                 val attrs = attributes.findAll(line)
                     .associate {
-                        it.groupValues[1] to it.groupValues[2]
+                        it.groupValues[1].lowercase(Locale.ROOT) to it.groupValues[2]
                     }
 
                 title = line.substringAfterLast(
@@ -833,14 +853,15 @@ class MainActivity : Activity() {
 
                 group = attrs["group-title"] ?: "Other"
                 logo = attrs["tvg-logo"] ?: ""
-                epgId = attrs["tvg-id"] ?: ""
+                epgId = attrs["tvg-id"]?.takeIf { it.isNotBlank() } ?: attrs["tvg-name"].orEmpty()
+                catchup = attrs["catchup-source"].orEmpty()
+                days = (attrs["catchup-days"] ?: attrs["tvg-rec"])?.toIntOrNull()?.coerceIn(0, 30) ?: 0
                 description = sequenceOf("plot", "description", "tvg-description")
                     .mapNotNull(attrs::get).firstOrNull { it.isNotBlank() }.orEmpty()
 
-            } else if (
-                line.startsWith("http://") ||
-                line.startsWith("https://")
-            ) {
+            } else if (line.startsWith("#EXTGRP:", true)) {
+                group = line.substringAfter(':').trim()
+            } else if (listOf("http://", "https://", "rtsp://").any { line.startsWith(it, true) }) {
                 // A TV playlist's group-title is a category, not proof of VOD.
                 val type = "tv"
 
@@ -852,7 +873,9 @@ class MainActivity : Activity() {
                         logo,
                         type,
                         epgId,
-                        description = description
+                        archiveDays = days,
+                        description = description,
+                        catchupSource = catchup
                     )
                 )
 
@@ -861,6 +884,8 @@ class MainActivity : Activity() {
                 logo = ""
                 epgId = ""
                 description = ""
+                catchup = ""
+                days = 0
             }
         }
 
@@ -872,14 +897,18 @@ class MainActivity : Activity() {
         requestedOrientation = if (isPhone()) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         prefs.edit().putString("recent", entry.url).apply()
         current = "player"
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_FULLSCREEN or
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         val frame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val liveTv = entry.type == "tv" && archived == null
         val view = PlayerView(this).apply {
-            useController = true
+            useController = !liveTv
             controllerAutoShow = false
+            controllerShowTimeoutMs = 5000
+            setShowSubtitleButton(true)
             isFocusable = true
             isFocusableInTouchMode = true
             resizeMode = when (prefs.getString("video_scale", "fit")) {
@@ -888,16 +917,16 @@ class MainActivity : Activity() {
                 else -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
             }
             player = this@MainActivity.player
-            setOnClickListener { showChannelOverlay() }
+            setOnClickListener { if (liveTv) showChannelOverlay() else showController() }
             setOnKeyListener { _, keyCode, event ->
                 if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
-                    KeyEvent.KEYCODE_MENU -> { showChannelOverlay(); true }
-                    KeyEvent.KEYCODE_DPAD_LEFT -> if (entry.type == "tv") { showSideGuide(); true } else false
-                    KeyEvent.KEYCODE_DPAD_RIGHT -> if (entry.type == "tv") { showChannelOverlay(); true } else false
-                    KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_MEDIA_NEXT -> { changeChannel(1); true }
-                    KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { changeChannel(-1); true }
+                    KeyEvent.KEYCODE_MENU -> { if (liveTv) showChannelOverlay() else showController(); true }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> if (liveTv) { showSideGuide(); true } else false
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> if (liveTv) { showChannelOverlay(); true } else false
+                    KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_MEDIA_NEXT -> if (liveTv) { changeChannel(1); true } else false
+                    KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> if (liveTv) { changeChannel(-1); true } else false
                     else -> false
                 }
             }
@@ -907,7 +936,7 @@ class MainActivity : Activity() {
         playerFrame = frame
         sidePanel = null
         sidePanelBack = null
-        if (isPhone()) {
+        if (liveTv && isPhone()) {
             val left = View(this).apply {
                 setBackgroundColor(Color.TRANSPARENT)
                 setOnClickListener { showSideGuide() }
@@ -919,8 +948,6 @@ class MainActivity : Activity() {
             frame.addView(left, FrameLayout.LayoutParams(dp(42), -1, Gravity.START))
             frame.addView(right, FrameLayout.LayoutParams(dp(42), -1, Gravity.END))
         }
-        val channelButton = button(tr("Каналы", "Sender", "Channels")) { showChannelOverlay() }
-        frame.addView(channelButton, FrameLayout.LayoutParams(dp(155), dp(55), Gravity.TOP or Gravity.END))
         if (prefs.getBoolean("show_clock", true)) {
             val clock = android.widget.TextClock(this).apply {
                 format24Hour = "HH:mm"; format12Hour = "hh:mm a"
@@ -934,7 +961,13 @@ class MainActivity : Activity() {
         setContentView(frame)
         view.requestFocus()
         try {
-            player?.setMediaItem(MediaItem.fromUri(Uri.parse(streamUrl)))
+            val uri = Uri.parse(streamUrl)
+            val media = MediaItem.Builder().setUri(uri)
+            when (uri.takeIf { it.isHierarchical }?.getQueryParameter("output")?.lowercase(Locale.ROOT)) {
+                "m3u8", "hls" -> media.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                "mpd", "dash" -> media.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD)
+            }
+            player?.setMediaItem(media.build())
             player?.prepare()
             player?.play()
         } catch (e: Exception) { toast(e.message ?: "Playback error") }
@@ -947,16 +980,25 @@ class MainActivity : Activity() {
         play(channels[(index + direction + channels.size) % channels.size])
     }
 
+    private var focusBeforePanel: View? = null
+
     private fun closeSidePanel() {
         sidePanel?.let { panelView -> (panelView.parent as? FrameLayout)?.removeView(panelView) }
         sidePanel = null
         sidePanelBack = null
-        playerView?.requestFocus()
+        focusBeforePanel?.requestFocus()
+        focusBeforePanel = null
     }
 
-    private fun openPanel(left: Boolean, heading: String, fill: (LinearLayout) -> Unit) {
-        val frame = playerFrame ?: return
+    private fun openPanel(
+        left: Boolean,
+        heading: String,
+        host: FrameLayout? = playerFrame,
+        fill: (LinearLayout) -> Unit
+    ) {
+        val frame = host ?: return
         closeSidePanel()
+        focusBeforePanel = currentFocus
         val panelWidth = (resources.displayMetrics.widthPixels * 0.42f).toInt()
             .coerceAtMost(dp(480)).coerceAtLeast(dp(250))
         val shell = LinearLayout(this).apply {
@@ -970,7 +1012,7 @@ class MainActivity : Activity() {
         }
         val headingRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         headingRow.addView(label(heading, 21f, true), LinearLayout.LayoutParams(0, -2, 1f))
-        headingRow.addView(button("✕") { closeSidePanel() })
+        headingRow.addView(button("✕") { sidePanelBack?.invoke() ?: closeSidePanel() })
         shell.addView(headingRow)
         val scroll = ScrollView(this)
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -978,6 +1020,8 @@ class MainActivity : Activity() {
         shell.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         frame.addView(shell, FrameLayout.LayoutParams(panelWidth, -1,
             if (left) Gravity.START else Gravity.END))
+        shell.translationX = if (left) -panelWidth.toFloat() else panelWidth.toFloat()
+        shell.animate().translationX(0f).setDuration(220L).start()
         sidePanel = shell
         fill(body)
         shell.requestFocus()
@@ -1041,10 +1085,11 @@ class MainActivity : Activity() {
 
     private fun guideEntries(entry: Entry): List<Programme> {
         val id = entry.epgId
-        val byId = epgSchedule[id]
+        val byId = epgSchedule[id] ?: epgSchedule.entries.firstOrNull { id.isNotBlank() && it.key.equals(id, true) }?.value
         if (!byId.isNullOrEmpty()) return byId.sortedBy { it.start }
-        val normalized = entry.title.trim().lowercase(Locale.ROOT)
-        val match = epgChannelNames.entries.firstOrNull { it.value.trim().lowercase(Locale.ROOT) == normalized }
+        fun normalized(value: String) = value.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
+        val titleKey = normalized(entry.title)
+        val match = epgChannelNames.entries.firstOrNull { titleKey.isNotEmpty() && normalized(it.value) == titleKey }
         return epgSchedule[match?.key].orEmpty().sortedBy { it.start }
     }
 
@@ -1070,10 +1115,31 @@ class MainActivity : Activity() {
                         val playbackTime = System.currentTimeMillis()
                         if (programme.stop <= playbackTime && durationMinutes > 0 &&
                             entry.archiveDays > 0 && programme.start >= playbackTime - entry.archiveDays * 86400000L) {
-                            val timestamp = SimpleDateFormat("yyyy-MM-dd:HH-mm", Locale.ROOT)
-                                .format(Date(programme.start))
-                            play(entry, "${entry.archiveBase}/$durationMinutes/$timestamp/${entry.archiveStreamId}.ts", archived = programme)
-                            return@button
+                            val template = entry.catchupSource
+                            val start = programme.start / 1000L
+                            val stop = programme.stop / 1000L
+                            val archiveUrl = when {
+                                template.isNotBlank() -> runCatching {
+                                    val resolved = template.replace("{utc}", start.toString())
+                                        .replace("{utcend}", stop.toString())
+                                        .replace("{start}", start.toString())
+                                        .replace("{end}", stop.toString())
+                                        .replace("{duration}", (stop - start).toString())
+                                    URL(URL(entry.url), resolved).toString().takeIf {
+                                        !it.contains('{') && (it.startsWith("https://") || it.startsWith("http://"))
+                                    }
+                                }.getOrNull()
+                                entry.archiveBase.isNotBlank() -> {
+                                    val timestamp = SimpleDateFormat("yyyy-MM-dd:HH-mm", Locale.ROOT)
+                                        .format(Date(programme.start))
+                                    "${entry.archiveBase}/$durationMinutes/$timestamp/${entry.archiveStreamId}.ts"
+                                }
+                                else -> null
+                            }
+                            if (archiveUrl != null) {
+                                play(entry, archiveUrl, archived = programme)
+                                return@button
+                            }
                         }
                         AlertDialog.Builder(this)
                             .setTitle(programme.title)
@@ -1145,8 +1211,9 @@ class MainActivity : Activity() {
             "language" to tr("Язык", "Sprache", "Language"),
             "remote" to tr("Телефон и QR-код", "Handy und QR-Code", "Phone and QR code")
         )
-        scaffold(if (section == null) "settings" else "settings_section")
-        sectionTitle(sections[section] ?: tr("Настройки", "Einstellungen", "Settings"))
+        val host = findViewById<FrameLayout>(android.R.id.content)
+        val heading = sections[section] ?: tr("\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "Einstellungen", "Settings")
+        openPanel(false, heading, host) { content ->
         when (section) {
             "tv_playlists" -> {
                 content.addView(button(tr("Управление ТВ-плейлистами M3U", "TV-Playlisten verwalten (M3U)", "Manage TV playlists (M3U)")) {
@@ -1156,6 +1223,7 @@ class MainActivity : Activity() {
                 content.addView(button(tr("Обновить телеканалы", "Sender aktualisieren", "Refresh channels")) {
                     if (activeList in lists.indices) loadPlaylist(activeList)
                     loadXtream()
+                    loadEpg()
                 })
             }
             "vod_playlists" -> {
@@ -1274,7 +1342,9 @@ class MainActivity : Activity() {
             }
         }
         val selected = if (section == null) sections.keys.toList().indexOf(lastSettingsItem.orEmpty()).coerceAtLeast(0) else 0
-        content.getChildAt(selected + 1)?.requestFocus()
+            content.getChildAt(selected)?.let { item -> item.post { item.requestFocus() } }
+        }
+        if (section != null) sidePanelBack = { showSettings() }
     }
 
     private fun showSources() {
@@ -1395,86 +1465,112 @@ class MainActivity : Activity() {
             }.setNegativeButton(tr("Отмена", "Abbrechen", "Cancel"), null).show()
     }
 
+    private var playlistGuideUrls = emptyList<String>()
+
     private fun loadEpg() {
         val generation = ++epgLoadGeneration
-        val address = prefs.getString("epg_url", "").orEmpty()
-        if (!address.startsWith("https://") && !address.startsWith("http://")) {
-            epgSchedule.clear()
-            epgChannelNames.clear()
-            return
-        }
+        val manual = prefs.getString("epg_url", "").orEmpty().trim()
+        val server = prefs.getString("xtream_server", "").orEmpty().trimEnd('/')
+        val user = prefs.getString("xtream_user", "").orEmpty()
+        val pass = prefs.getString("xtream_pass", "").orEmpty()
+        val provider = if (server.isNotBlank() && user.isNotBlank() && pass.isNotBlank()) {
+            "$server/xmltv.php?username=${URLEncoder.encode(user, "UTF-8")}&password=${URLEncoder.encode(pass, "UTF-8")}"
+        } else ""
+        val addresses = (listOf(manual) + playlistGuideUrls.take(4) + listOf(
+            provider, "https://free-epg.de/api/epg/de.xml.gz", "https://free-epg.de/api/epg/ru.xml.gz"
+        )).filter { it.startsWith("http://") || it.startsWith("https://") }.distinct()
+        val now = System.currentTimeMillis()
         thread {
-            try {
-                val conn = URL(address).openConnection() as HttpURLConnection
-                conn.connectTimeout = 15000; conn.readTimeout = 45000
-                val schedule = mutableMapOf<String, MutableList<Programme>>()
-                val names = mutableMapOf<String, String>()
-                val now = System.currentTimeMillis()
-                try {
-                    val factory = javax.xml.parsers.SAXParserFactory.newInstance()
-                    factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-                    factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-                    factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-                    val parser = factory.newSAXParser()
-                    val raw = conn.inputStream
-                    val source = if (address.substringBefore('?').lowercase(Locale.ROOT).endsWith(".gz") ||
-                        conn.contentEncoding.equals("gzip", true)) java.util.zip.GZIPInputStream(raw) else raw
-                    source.use { input ->
-                        parser.parse(input, object : org.xml.sax.helpers.DefaultHandler() {
-                            var channel = ""; var start = 0L; var stop = 0L
-                            var channelId = ""; var title = ""; var description = ""
-                            var field = ""; val chars = StringBuilder()
-                            fun xmlTime(value: String): Long {
-                                return try {
-                                    val rawTime = value.trim()
-                                    val fmt = SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
-                                    val offset = rawTime.substringAfter(' ', "+0000")
-                                    fmt.timeZone = java.util.TimeZone.getTimeZone("GMT$offset")
-                                    fmt.parse(rawTime.take(14))?.time ?: 0L
-                                } catch (_: Exception) { 0L }
-                            }
-                            override fun startElement(uri: String?, localName: String?, qName: String?, attrs: org.xml.sax.Attributes) {
-                                when (qName) {
-                                    "channel" -> channelId = attrs.getValue("id") ?: ""
-                                    "programme" -> {
-                                        channel = attrs.getValue("channel") ?: ""
-                                        start = xmlTime(attrs.getValue("start") ?: "")
-                                        stop = xmlTime(attrs.getValue("stop") ?: "")
-                                        title = ""; description = ""
-                                    }
-                                    "title", "desc", "display-name" -> { field = qName; chars.setLength(0) }
-                                }
-                            }
-                            override fun characters(ch: CharArray, index: Int, length: Int) {
-                                if (field.isNotEmpty()) chars.append(ch, index, length)
-                            }
-                            override fun endElement(uri: String?, localName: String?, qName: String?) {
-                                if (qName == field) {
-                                    when (field) {
-                                        "title" -> title = chars.toString().trim()
-                                        "desc" -> description = chars.toString().trim()
-                                        "display-name" -> if (channelId.isNotBlank() && !names.containsKey(channelId)) names[channelId] = chars.toString().trim()
-                                    }
-                                    field = ""
-                                }
-                                if (qName == "programme" && channel.isNotBlank() && start > 0L && stop > start &&
-                                    stop > now - 7L * 86400000 && start < now + 7L * 86400000) {
-                                    val programmes = schedule.getOrPut(channel) { mutableListOf() }
-                                    if (programmes.size < 800) programmes.add(Programme(channel, start, stop, title, description))
-                                }
-                                if (qName == "channel") channelId = ""
-                            }
-                        })
-                    }
-                } finally { conn.disconnect() }
-                runOnUiThread {
-                    if (generation != epgLoadGeneration) return@runOnUiThread
-                    epgSchedule.clear(); epgSchedule.putAll(schedule)
-                    epgChannelNames.clear(); epgChannelNames.putAll(names)
-                    if (current == "tv" || current == "favorites") showCatalog(current, catalogGroup)
+            val schedule = mutableMapOf<String, MutableList<Programme>>()
+            val names = mutableMapOf<String, String>()
+            addresses.forEach { address ->
+                val feed = runCatching { readGuide(address, now) }.getOrNull()
+                if (feed != null) {
+                    feed.first.forEach { (id, entries) -> if (id !in schedule) schedule[id] = entries }
+                    feed.second.forEach { (id, name) -> if (id !in names) names[id] = name }
                 }
-            } catch (e: Exception) { runOnUiThread { toast("EPG: ${e.message}") } }
+            }
+            runOnUiThread {
+                if (generation != epgLoadGeneration || isDestroyed) return@runOnUiThread
+                if (schedule.isNotEmpty()) {
+                    epgSchedule.clear()
+                    epgSchedule.putAll(schedule)
+                    epgChannelNames.clear()
+                    epgChannelNames.putAll(names)
+                    if (current == "tv" || current == "favorites") showCatalog(current, catalogGroup)
+                } else {
+                    toast(tr("EPG: нет данных", "EPG: keine Daten", "EPG: no data"))
+                }
+            }
         }
+    }
+
+    private fun readGuide(address: String, now: Long): Pair<Map<String, MutableList<Programme>>, Map<String, String>> {
+        val connection = URL(address).openConnection() as HttpURLConnection
+        connection.connectTimeout = 12000
+        connection.readTimeout = 30000
+        val schedule = mutableMapOf<String, MutableList<Programme>>()
+        val names = mutableMapOf<String, String>()
+        val timeFormat = SimpleDateFormat("yyyyMMddHHmmss Z", Locale.US).apply { isLenient = false }
+        fun time(value: String?): Long {
+            val parts = value.orEmpty().trim().split(Regex("\\s+"), limit = 2)
+            val stamp = parts[0]
+            if (stamp.length !in listOf(8, 10, 12, 14) || !stamp.all(Char::isDigit)) return 0L
+            val zone = parts.getOrNull(1)?.replace(":", "") ?: "+0000"
+            return runCatching { timeFormat.parse(stamp.padEnd(14, '0') + " " + zone)?.time ?: 0L }.getOrDefault(0L)
+        }
+        try {
+            connection.inputStream.buffered().use { raw ->
+                raw.mark(2)
+                val gzip = raw.read() == 0x1f && raw.read() == 0x8b
+                raw.reset()
+                val data = if (gzip) java.util.zip.GZIPInputStream(raw) else raw
+                data.use { input ->
+                    val xml = android.util.Xml.newPullParser()
+                    xml.setFeature("http://xmlpull.org/v1/doc/features.html#process-docdecl", false)
+                    xml.setInput(input, null)
+                    var id = ""
+                    var channel = ""
+                    var title = ""
+                    var description = ""
+                    var start = 0L
+                    var stop = 0L
+                    while (xml.eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                        when (xml.eventType) {
+                            org.xmlpull.v1.XmlPullParser.START_TAG -> when (xml.name) {
+                                "channel" -> id = xml.getAttributeValue(null, "id").orEmpty()
+                                "display-name" -> {
+                                    val name = xml.nextText().trim()
+                                    if (id.isNotBlank() && name.isNotBlank() && id !in names) names[id] = name
+                                }
+                                "programme" -> {
+                                    channel = xml.getAttributeValue(null, "channel").orEmpty()
+                                    start = time(xml.getAttributeValue(null, "start"))
+                                    stop = time(xml.getAttributeValue(null, "stop"))
+                                    title = ""
+                                    description = ""
+                                }
+                                "title" -> title = xml.nextText().trim()
+                                "desc" -> description = xml.nextText().trim()
+                                else -> Unit
+                            }
+                            org.xmlpull.v1.XmlPullParser.END_TAG -> when (xml.name) {
+                                "channel" -> id = ""
+                                "programme" -> if (channel.isNotBlank() && title.isNotBlank() && start > 0L &&
+                                    stop > start && stop > now - 14L * 86400000 && start < now + 7L * 86400000) {
+                                    val programmes = schedule.getOrPut(channel) { mutableListOf() }
+                                    if (programmes.size < 1200) programmes.add(Programme(channel, start, stop, title, description))
+                                } else Unit
+                                else -> Unit
+                            }
+                            else -> Unit
+                        }
+                        xml.next()
+                    }
+                }
+            }
+        } finally { connection.disconnect() }
+        return schedule to names
     }
 
     private fun localIp(): String? {
@@ -1742,6 +1838,7 @@ class MainActivity : Activity() {
                                     prefs.edit().putString("xtream_server", url.trimEnd('/'))
                                         .putString("xtream_user", user).putString("xtream_pass", password).apply()
                                     loadXtream()
+                                    loadEpg()
                                 }
                             }
                         }
@@ -1868,12 +1965,12 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (current == "home") {
-            finish()
+        if (sidePanel != null) {
+            sidePanelBack?.invoke() ?: closeSidePanel()
             return
         }
-        if (current == "player" && sidePanel != null) {
-            sidePanelBack?.invoke() ?: closeSidePanel()
+        if (current == "home") {
+            finish()
             return
         }
         if (current == "player") {
