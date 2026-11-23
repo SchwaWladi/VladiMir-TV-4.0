@@ -89,7 +89,6 @@ class MainActivity : Activity() {
     private val remoteToken = UUID.randomUUID()
         .toString().replace("-", "")
 
-    @Volatile
     @Volatile private var remoteStarting = false
     @Volatile private var remoteRunning = false
 
